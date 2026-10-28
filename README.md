@@ -12,14 +12,6 @@ and decompression, one-shot and streaming.
   The fuzzers (`nimble fuzzAsan`, libFuzzer targets in `fuzz/`) run with
   AddressSanitizer and the signed overflow and shift checks of
   UndefinedBehaviorSanitizer.
-- Fast: on x86-64 (Silesia corpus, Ryzen 9 7950X, gcc 16, `-d:release`),
-  as a share of the speed of liblz4 1.10.0 (the Arch Linux package):
-  - block decompression: 80-88 %
-  - frame decompression (default options, content checksum checked):
-    113-144 % of `LZ4F_decompress` when both write into a buffer made
-    beforehand, 109-144 % for `decompressFrame`, which grows its result
-  - fast compression: 87-93 % as one block, 83-95 % in 64 KiB blocks
-  - high compression (levels 9 and 12): 66-98 %
 - Same output as liblz4, byte for byte in the tests on little-endian
   64-bit systems: the compressors are ports of lz4.c and lz4hc.c. With a
   dictionary, blocks match `LZ4_loadDict` (`LZ4_loadDictHC`) and the
@@ -30,7 +22,9 @@ and decompression, one-shot and streaming.
   the fast levels, and against the `lz4` tool from 4 MiB on (see
   `FrameOptions.level`, `flush` and `compressFrame`).
 
-Requires Nim 2.2.0 or later (C or C++ backend).
+## Requirements
+
+- Nim 2.2.0 or later (C / C++ backend)
 
 ## Usage
 
@@ -127,6 +121,21 @@ Compression levels follow LZ4F's `compressionLevel`: negative values trade
 ratio for speed (acceleration `-level + 1`), 0 and 1 are the default
 (fast) compressor, 2 to 12 the high compression (HC) one, slower and
 smaller as the level grows (13 and more are 12).
+
+## Performance
+
+| Operation                                                     | Speed     |
+| ------------------------------------------------------------- | --------- |
+| Block decompression                                           | 80-88 %   |
+| Frame decompression into a buffer made beforehand             | 113-144 % |
+| Frame decompression with `decompressFrame` (grows its result) | 109-144 % |
+| Fast compression, one block                                   | 87-93 %   |
+| Fast compression, 64 KiB blocks                               | 83-95 %   |
+| High compression (levels 9 and 12)                            | 66-98 %   |
+
+Frame decompression uses the default options, checks the content
+checksum and is compared with `LZ4F_decompress` writing into a buffer
+made beforehand.
 
 ## License
 
