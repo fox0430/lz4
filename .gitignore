@@ -1,3 +1,16 @@
 nimcache/
 nimblecache/
 htmldocs/
+
+# Binaries that nim c writes next to the sources
+/tests/t*
+!/tests/t*.nim
+/tests/huge
+/bench/bench
+/fuzz/fuzz_mutate
+/fuzz/lf_*
+!/fuzz/lf_*.nim
+
+# Large test inputs (see tests/data/README.md)
+/tests/data/*
+!/tests/data/README.md
