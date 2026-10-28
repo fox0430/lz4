@@ -4,7 +4,7 @@ Fuzzing harnesses.
 
 | File | What it does | How to run |
 |---|---|---|
-| `fuzz_mutate.nim` | Mutation fuzzer without dependencies: generates valid blocks and frame streams, mutates them and checks that decoding either succeeds or raises `Lz4Error`, that `decompressBlock` and `decompressBlockInto` agree, that `FrameDecoder` agrees with `decompressFrame`, and that the safe and fast versions agree; also checks compression round trips with destinations of various sizes, and that one `FrameEncoder`, reused from frame to frame, writes the frames of new ones | `nimble fuzz` (runtime checks on), `nimble fuzzAsan` (`-d:danger` + ASan + UBSan) |
+| `fuzz_mutate.nim` | Mutation fuzzer without dependencies: generates valid blocks and frame streams, mutates them and checks that decoding either succeeds or raises `Lz4Error`, that `decompressBlock` and `decompressBlockInto` agree, that `FrameDecoder` agrees with `decompressFrame`, and that the safe and fast versions agree; also checks compression round trips with destinations of various sizes, and that one `FrameEncoder`, reused from frame to frame, writes the frames of new ones | `nimble fuzz` (runtime checks on), `nimble fuzzAsan` (`-d:danger` + ASan + UBSan); `FUZZ_SEED=<n>` picks the seed (otherwise the default of `fuzz_mutate.nim`) |
 | `lf_block.nim` | libFuzzer: block decoder (bytes 0-1: output capacity, rest: block) | `nimble fuzzLibFuzzer`, then `fuzz/lf_block -max_total_time=60 corpus/` |
 | `lf_diff_block.nim` | libFuzzer: block decoder against liblz4 (same input layout as `lf_block`) | as above |
 | `lf_compress.nim` | libFuzzer: block compressor (bytes 0-11: end, capacity and level of four pieces; rest: data) | as above |

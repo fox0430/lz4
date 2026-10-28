@@ -1,0 +1,255 @@
+name: CI
+
+on:
+  pull_request:
+    paths: &paths
+      - '.github/workflows/ci.yml'
+      - '.github/actions/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'fuzz/**'
+      - 'bench/**'
+      - 'lz4.nimble'
+      # tests/treadme.nim runs the examples of README.md.
+      - 'README.md'
+  push:
+    paths: *paths
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # PRs cancel their own earlier runs (github.ref, unlike head_ref, is per
+  # PR). Each main run gets its own group: a shared one would drop pending
+  # runs even with cancel-in-progress off.
+  group: ci-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests on ${{ matrix.nim-version }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    # devel tracks upstream and may break independently of this repo.
+    continue-on-error: ${{ matrix.nim-version == 'devel' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+        nim-version:
+          # The oldest version lz4.nimble accepts.
+          - '2.2.0'
+          - 'stable'
+          - 'devel'
+        include:
+          # arm64
+          - os: macos-latest
+            nim-version: 'stable'
+          - os: windows-latest
+            nim-version: 'stable'
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Nim
+        uses: ./.github/actions/setup-nim
+        with:
+          nim-version: ${{ matrix.nim-version }}
+
+      - name: Setup lz4
+        uses: ./.github/actions/setup-lz4
+        if: runner.os != 'Windows'
+
+      # With the cross-checks against liblz4 and the lz4 CLI, which must be
+      # 1.10.0 (they fail otherwise when CI is set).
+      - name: Run tests
+        run: nimble test -y
+        if: runner.os != 'Windows'
+
+      # No liblz4 or lz4 CLI on Windows.
+      - name: Run tests (without liblz4 and the lz4 CLI)
+        run: nimble testPure -y
+        if: runner.os == 'Windows'
+
+  # The same tests with other build options.
+  variants:
+    name: Tests (${{ matrix.task }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        task:
+          - testDanger
+          - testSafe
+          - testRefc
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Nim
+        uses: ./.github/actions/setup-nim
+
+      - name: Setup lz4
+        uses: ./.github/actions/setup-lz4
+
+      - name: Run ${{ matrix.task }}
+        run: nimble ${{ matrix.task }} -y
+
+  # Inputs above 1 GiB: about 4 GiB of memory and several minutes.
+  huge:
+    name: Tests (testHuge)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Nim
+        uses: ./.github/actions/setup-nim
+
+      - name: Run testHuge
+        run: nimble testHuge -y
+
+  fuzz:
+    name: Fuzzing
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # How long each libFuzzer target runs, and at most its corpus merge.
+      FUZZ_SECONDS: 60
+      # The seed of fuzz_mutate (the libFuzzer targets do not take it).
+      # Unset on PRs (fuzz_mutate's default), so that they fail only on
+      # their own changes. Other runs take a new one, kept on re-runs so
+      # that a failure reproduces.
+      FUZZ_SEED: ${{ github.event_name != 'pull_request' && github.run_id || '' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Nim
+        uses: ./.github/actions/setup-nim
+
+      # The lf_diff_* targets compare against liblz4.
+      - name: Setup lz4
+        id: setup
+        uses: ./.github/actions/setup-lz4
+
+      # The fuzzers below also run after one of them fails (but not after
+      # a failed setup), so that one run shows all the failures.
+      - name: Mutation fuzzer (runtime checks on)
+        run: nimble fuzz -y
+
+      # ASan fails to start with the high mmap ASLR entropy of recent
+      # kernels. Only the ASan builds below need this, so it does not
+      # hold back the fuzzer above.
+      - name: Lower ASLR entropy for ASan
+        id: aslr
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: sudo sysctl vm.mmap_rnd_bits=28
+
+      - name: Mutation fuzzer (-d:danger, ASan, UBSan)
+        if: ${{ !cancelled() && steps.aslr.outcome == 'success' }}
+        run: nimble fuzzAsan -y
+
+      - name: Build the libFuzzer targets
+        id: lfbuild
+        if: ${{ !cancelled() && steps.aslr.outcome == 'success' }}
+        run: nimble fuzzLibFuzzer -y
+
+      # Cache entries cannot be overwritten: every main run saves a new one
+      # and this restores the latest.
+      - name: Restore the libFuzzer corpus
+        if: ${{ !cancelled() && steps.lfbuild.outcome == 'success' }}
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ runner.temp }}/corpus
+          key: lf-corpus-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: lf-corpus-
+
+      # Not reproducible by a re-run (a time limit, and the corpus of the
+      # latest main run): the crashing inputs are uploaded instead.
+      - name: Run the libFuzzer targets
+        id: libfuzzer
+        if: ${{ !cancelled() && steps.lfbuild.outcome == 'success' }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/crashes"
+          failed=()
+          for src in fuzz/lf_*.nim; do
+            target=${src%.nim}
+            name=${target##*/}
+            corpus=$RUNNER_TEMP/corpus/$name
+            # libFuzzer writes the new inputs into the first directory, so
+            # that the restored corpus stays as it was until the merge.
+            new=$RUNNER_TEMP/corpus-new/$name
+            min=$RUNNER_TEMP/corpus-min/$name
+            mkdir -p "$corpus" "$new" "$min"
+            echo "::group::$name"
+            if ! "$target" -max_total_time="$FUZZ_SECONDS" \
+              -artifact_prefix="$RUNNER_TEMP/crashes/$name-" "$new" "$corpus"; then
+              failed+=("$name")
+            # Then keep only the inputs that add coverage, so that the saved
+            # corpus does not grow with every run. Not after a crash: the
+            # merge skips the inputs that crash, so it would drop an input
+            # of the corpus that crashes now, and the next run could pass.
+            # timeout stops a merge longer than the fuzzing (child processes
+            # included): the corpus then stays as restored.
+            elif ! timeout "$FUZZ_SECONDS" "$target" -merge=1 \
+              -artifact_prefix="$RUNNER_TEMP/crashes/$name-merge-" \
+              "$min" "$corpus" "$new"; then
+              echo "::warning::$name: could not minimize the corpus"
+            # The merge skips a crashing input and still exits 0.
+            elif compgen -G "$RUNNER_TEMP/crashes/$name-merge-*" > /dev/null; then
+              failed+=("$name (merge)")
+            else
+              rm -rf "$corpus"
+              mv "$min" "$corpus"
+            fi
+            echo "::endgroup::"
+          done
+          if (( ${#failed[@]} )); then
+            echo "::error::libFuzzer targets failed: ${failed[*]}"
+            exit 1
+          fi
+
+      # Also after a crash, which leaves that target's corpus as restored,
+      # without the new inputs (see above).
+      # Only on main: PRs restore main's corpus, and their own entries would
+      # only fill the cache.
+      - name: Save the libFuzzer corpus
+        if: ${{ !cancelled() && steps.libfuzzer.outcome != 'skipped' && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ runner.temp }}/corpus
+          key: lf-corpus-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # Named per attempt, so that a re-run does not reuse the name of an
+      # earlier attempt's artifact.
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-crashes-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/crashes
+          if-no-files-found: ignore
+
+  docs:
+    name: Docs and benchmarks build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Nim
+        uses: ./.github/actions/setup-nim
+
+      # bench/bench.nim links against liblz4.
+      - name: Setup lz4
+        uses: ./.github/actions/setup-lz4
+
+      # nimble docs fails on any warning of nim doc.
+      - name: Build the API documentation (runs the examples)
+        run: nimble docs -y
+
+      - name: Build the benchmarks
+        run: nim c --hints:off -d:danger bench/bench.nim

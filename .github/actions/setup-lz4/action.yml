@@ -1,0 +1,47 @@
+name: Set up lz4 1.10.0
+description: >-
+  Builds the lz4 CLI and a static liblz4.a from lz4 1.10.0 (cached), puts the
+  CLI on PATH and points CLZ4_LINK at the library, for the tests that
+  cross-check against them (tests/tinterop_cli.nim, tests/tinterop_lib.nim)
+  and the lf_diff_* fuzz targets.
+
+runs:
+  using: composite
+  steps:
+    # The runner image (ubuntu24, for example; empty off GitHub's runners):
+    # binaries built on one may not run on another (a newer glibc, while
+    # ubuntu-latest moves to a new release).
+    - name: Get the runner image
+      id: image
+      shell: bash
+      run: echo "os=${ImageOS-}" >> "$GITHUB_OUTPUT"
+
+    # Changing this file rebuilds lz4.
+    - name: Cache lz4
+      id: cache
+      uses: actions/cache@v5
+      with:
+        path: ~/lz4-1.10.0
+        key: lz4-1.10.0-${{ runner.os }}-${{ runner.arch }}-${{ steps.image.outputs.os }}-${{ hashFiles('.github/actions/setup-lz4/action.yml') }}
+
+    - name: Build lz4
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        dir=~/lz4-1.10.0
+        git clone --quiet --depth 1 --branch v1.10.0 https://github.com/lz4/lz4.git "$dir"
+        # The tag could move: check that it is still the 1.10.0 release.
+        test "$(git -C "$dir" rev-parse HEAD)" = ebb370ca83af193212df4dcbadcc5d87bc0de2f0
+        jobs=$(getconf _NPROCESSORS_ONLN)
+        make -C "$dir/lib" -j"$jobs" liblz4.a
+        make -C "$dir/programs" -j"$jobs" lz4
+
+    # A static library, so that the system liblz4.so (another version) is not
+    # picked up instead. tests/config.nims passes CLZ4_LINK to tests/clz4.nim.
+    - name: Use lz4
+      shell: bash
+      run: |
+        dir=~/lz4-1.10.0
+        echo "$dir/programs" >> "$GITHUB_PATH"
+        echo "CLZ4_LINK=$dir/lib/liblz4.a" >> "$GITHUB_ENV"
+        "$dir/programs/lz4" --version
