@@ -224,6 +224,8 @@ proc main() =
       uint64(parseBiggestUInt(paramStr(2)))
     else:
       1'u64
+  # First, so that a failing run shows the seed that reproduces it.
+  echo "fuzz_mutate: ", iterations, " iterations (seed ", seed, ")"
   var r = initRng(seed)
   # Compression draws from its own generator, so that adding it did not
   # change the decoder inputs a given seed produces.
@@ -251,6 +253,6 @@ proc main() =
       doAssert decompressBlock(exactCopy(blk), data.len) == data
     decodeBlock(mutate(r, blk), r)
     decodeBlock(randomBytes(r.below(64), r.next()), r)
-  echo "fuzz_mutate: ", iterations, " iterations (seed ", seed, "): ok"
+  echo "fuzz_mutate: ok"
 
 main()

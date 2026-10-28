@@ -51,15 +51,29 @@ task docs, "Build the API documentation into htmldocs/ (runs the examples)":
   # The public modules only, not src/lz4/private (no --project), all with
   # the same docRoot, so that their pages land in one tree
   # (htmldocs/lz4/...) and link to each other; then one index.
+  # Any warning (a broken link, or a deprecated call in an example) fails
+  # the build: nim doc only reports them, and --warningAsError:all is not
+  # supported.
+  proc nimDoc(args: string) =
+    let cmd = "nim " & args
+    echo "Executing ", cmd
+    let (output, exitCode) = gorgeEx(cmd)
+    if output.len > 0:
+      echo output
+    if exitCode != 0:
+      quit "FAILED: " & cmd
+    if "Warning: " in output:
+      quit "FAILED: " & cmd & " (warnings)"
+
   rmDir("htmldocs")
   let flags =
     "--hints:off --index:on --outdir:htmldocs" & " --docRoot:" &
     quoteShell(thisDir() / "src")
-  exec "nim doc " & flags & " src/lz4.nim"
+  nimDoc "doc " & flags & " src/lz4.nim"
   for f in listFiles("src/lz4"):
     if f.endsWith(".nim"):
-      exec "nim doc " & flags & " " & quoteShell(f)
-  exec "nim buildIndex --hints:off -o:htmldocs/theindex.html htmldocs"
+      nimDoc "doc " & flags & " " & quoteShell(f)
+  nimDoc "buildIndex --hints:off -o:htmldocs/theindex.html htmldocs"
 
 task bench, "Run the benchmarks against liblz4":
   exec "nim c -r --hints:off -d:danger bench/bench.nim"
@@ -69,11 +83,17 @@ const asanFlags =
   "-d:danger -d:useMalloc --cc:clang --debugger:native" & " --passC:" & sanitizers &
   " --passC:-fno-sanitize-recover=all" & " --passL:" & sanitizers
 
+# FUZZ_SEED picks the seed (fuzz_mutate's default when unset or empty).
+proc fuzzMutate(flags: string) =
+  let seed = getEnv("FUZZ_SEED")
+  exec "nim c -r --hints:off " & flags & " fuzz/fuzz_mutate.nim 100000" &
+    (if seed.len > 0: " " & quoteShell(seed) else: "")
+
 task fuzz, "Run the mutation fuzzer for a short time":
-  exec "nim c -r --hints:off -d:release fuzz/fuzz_mutate.nim 100000"
+  fuzzMutate("-d:release")
 
 task fuzzAsan, "Run the mutation fuzzer built with -d:danger, ASan and UBSan":
-  exec "nim c -r --hints:off " & asanFlags & " fuzz/fuzz_mutate.nim 100000"
+  fuzzMutate(asanFlags)
 
 task fuzzLibFuzzer, "Build the libFuzzer targets in fuzz/ (needs clang)":
   const lf = "-fsanitize=fuzzer,address,signed-integer-overflow,shift"

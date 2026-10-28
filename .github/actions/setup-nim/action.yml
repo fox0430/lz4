@@ -1,0 +1,73 @@
+name: Set up Nim
+description: >-
+  Installs Nim (stable unless nim-version says otherwise) with
+  jiro4989/setup-nim-action, cached where that action builds it from source.
+
+inputs:
+  nim-version:
+    description: The Nim version, or stable or devel.
+    default: stable
+
+runs:
+  using: composite
+  steps:
+    # setup-nim-action downloads a build of Nim on Linux x86_64 and Windows
+    # (and of devel from the nightlies), and elsewhere builds it from source,
+    # for many minutes. Those builds are cached, keyed on the exact version
+    # (what stable stands for now), which is the one then installed.
+    - name: Resolve the Nim version
+      id: nim
+      shell: bash
+      env:
+        NIM_VERSION: ${{ inputs.nim-version }}
+        FROM_SOURCE: ${{ runner.os == 'macOS' || (runner.os == 'Linux' && runner.arch != 'X64') }}
+      run: |
+        version=$NIM_VERSION
+        if [[ $FROM_SOURCE == true ]]; then
+          if [[ $version == stable ]]; then
+            version=$(curl -sSfL --retry 3 https://nim-lang.org/channels/stable)
+          fi
+          # Not devel, nor a range such as 2.2.x.
+          if [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "cache=true" >> "$GITHUB_OUTPUT"
+          fi
+        fi
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        # The runner image (macos15, for example), as in setup-lz4.
+        echo "image=${ImageOS-}" >> "$GITHUB_OUTPUT"
+
+    # Changing this file rebuilds Nim.
+    - name: Restore Nim
+      id: cache
+      if: steps.nim.outputs.cache == 'true'
+      uses: actions/cache/restore@v5
+      with:
+        path: .nim_runtime
+        key: nim-${{ steps.nim.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.nim.outputs.image }}-${{ hashFiles('.github/actions/setup-nim/action.yml') }}
+
+    # use-nightlies has no effect unless nim-version is devel.
+    - name: Setup Nim
+      if: steps.cache.outputs.cache-hit != 'true'
+      uses: jiro4989/setup-nim-action@v2
+      with:
+        nim-version: ${{ steps.nim.outputs.version }}
+        use-nightlies: true
+        repo-token: ${{ github.token }}
+
+    # Now rather than at the end of the job, which may fail.
+    - name: Save Nim
+      if: steps.nim.outputs.cache == 'true' && steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: .nim_runtime
+        key: ${{ steps.cache.outputs.cache-primary-key }}
+
+    # What setup-nim-action does after installing Nim into .nim_runtime (its
+    # default nim-install-directory) in the workspace.
+    - name: Use the cached Nim
+      if: steps.cache.outputs.cache-hit == 'true'
+      shell: bash
+      run: |
+        echo "$PWD/.nim_runtime/bin" >> "$GITHUB_PATH"
+        echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
+        .nim_runtime/bin/nim -v
